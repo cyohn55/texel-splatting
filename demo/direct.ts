@@ -166,21 +166,6 @@ export function createDirect(config: DirectConfig): DirectEncoder {
             ${PATH_WGSL}
             ${LIGHTING_WGSL}
 
-            // Bilinear interpolation of hash2 across neighbouring grid cells.
-            // Replaces the hard per-cell binary value with a smooth field, eliminating
-            // the sharp cell-boundary transitions that cause temporal shimmer when the
-            // camera moves.
-            fn bilinearHash2(p: vec2f) -> f32 {
-                let i = floor(p);
-                let f = fract(p);
-                let u = f * f * (3.0 - 2.0 * f); // smoothstep
-                return mix(
-                    mix(hash2(i),                    hash2(i + vec2f(1.0, 0.0)), u.x),
-                    mix(hash2(i + vec2f(0.0, 1.0)),  hash2(i + vec2f(1.0, 1.0)), u.x),
-                    u.y
-                );
-            }
-
             struct FsOut {
                 @location(0) color: vec4f,
                 @location(1) dist: f32,
@@ -189,7 +174,7 @@ export function createDirect(config: DirectConfig): DirectEncoder {
             @fragment fn fs(in: VsOut) -> FsOut {
                 let t = clamp(in.worldPos.y / ${config.height}, 0.0, 1.0);
                 let wp = in.worldPos.xz;
-                let h = bilinearHash2(wp * ${config.density}.0);
+                let h = hash2(floor(wp * ${config.density}.0));
                 if (h < t) { discard; }
                 if (t > 0.0 && pathGrassDiscard(wp)) { discard; }
 
