@@ -171,6 +171,34 @@ export function createDirect(config: DirectConfig): DirectEncoder {
                 @location(1) dist: f32,
             }
 
+            // Voronoi region hash: finds the nearest randomly-jittered seed within
+            // a scaled grid and returns that seed's hash value. Produces irregular
+            // organic polygons instead of uniform squares.
+            fn voronoiHash(wp: vec2f, scale: f32) -> f32 {
+                let p  = wp * scale;
+                let ip = floor(p);
+                let fp = fract(p);
+                var minDist = 8.0;
+                var cellId  = 0.0;
+                for (var jj = -1; jj <= 1; jj++) {
+                    for (var ii = -1; ii <= 1; ii++) {
+                        let nb     = vec2f(f32(ii), f32(jj));
+                        let cell   = ip + nb;
+                        let jitter = vec2f(
+                            hash2(cell),
+                            hash2(cell + vec2f(31.1, 17.9))
+                        );
+                        let diff = nb + jitter - fp;
+                        let dist = dot(diff, diff);
+                        if (dist < minDist) {
+                            minDist = dist;
+                            cellId  = hash2(cell + vec2f(7.3, 13.1));
+                        }
+                    }
+                }
+                return cellId;
+            }
+
             // Mip-mapped hash: blends between adjacent LOD levels based on how many
             // density cells fit within a single pixel (computed via screen-space
             // derivatives). When cells are sub-pixel, a coarser level is used so
@@ -189,9 +217,9 @@ export function createDirect(config: DirectConfig): DirectEncoder {
                 let t = clamp(in.worldPos.y / ${config.height}, 0.0, 1.0);
                 let wp = in.worldPos.xz;
 
-                // Broad-patch height scale: ~5-unit zones range from 25% to 100%
-                // of max height, creating clearly visible short and tall areas.
-                let patchHeightScale = mix(0.25, 1.0, hash2(floor(wp * 0.2)));
+                // Voronoi-shaped height patches: irregular organic polygons (~5-unit
+                // regions) ranging from 25% to 100% of max height.
+                let patchHeightScale = mix(0.25, 1.0, voronoiHash(wp, 0.2));
                 let h = lodHash2(wp, ${config.density}.0) * patchHeightScale;
                 if (h < t) { discard; }
                 if (t > 0.0 && pathGrassDiscard(wp)) { discard; }
