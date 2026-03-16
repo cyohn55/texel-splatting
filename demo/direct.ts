@@ -171,10 +171,24 @@ export function createDirect(config: DirectConfig): DirectEncoder {
                 @location(1) dist: f32,
             }
 
+            // Mip-mapped hash: blends between adjacent LOD levels based on how many
+            // density cells fit within a single pixel (computed via screen-space
+            // derivatives). When cells are sub-pixel, a coarser level is used so
+            // each pixel maps to one stable cell, eliminating temporal shimmer.
+            fn lodHash2(wp: vec2f, density: f32) -> f32 {
+                let densityWp = wp * density;
+                let fw = max(fwidth(densityWp.x), fwidth(densityWp.y));
+                let lod = max(log2(fw), 0.0);
+                let lod0 = floor(lod);
+                let h0 = hash2(floor(densityWp / exp2(lod0)));
+                let h1 = hash2(floor(densityWp / exp2(lod0 + 1.0)));
+                return mix(h0, h1, fract(lod));
+            }
+
             @fragment fn fs(in: VsOut) -> FsOut {
                 let t = clamp(in.worldPos.y / ${config.height}, 0.0, 1.0);
                 let wp = in.worldPos.xz;
-                let h = hash2(floor(wp * ${config.density}.0));
+                let h = lodHash2(wp, ${config.density}.0);
                 if (h < t) { discard; }
                 if (t > 0.0 && pathGrassDiscard(wp)) { discard; }
 

@@ -8,6 +8,7 @@ import { createPostProcess } from "../src/post";
 import { createSplat } from "../src/splat";
 import { createSphere, createStones } from "./scene";
 import { createDirect } from "./direct";
+import { createFxaa } from "../Working/fxaa";
 import {
     createSky,
     sampleGradient,
@@ -313,7 +314,10 @@ const direct = createDirect({
     skyBuffer: sky.skyBuffer,
 });
 
+const fxaa = createFxaa(device);
+
 direct.resize(renderW, renderH, colorView, posterizeView);
+fxaa.resize(renderW, renderH);
 post.resize(renderW, renderH);
 
 let proj = perspective(FOV, renderW / renderH, 0.1, 200);
@@ -349,6 +353,7 @@ new ResizeObserver(() => {
     posterizeView = posterizeTexture.createView();
     depthView = depthTexture.createView();
     direct.resize(w, viewportH, colorView, posterizeView);
+    fxaa.resize(w, viewportH);
     godrays.resize(w, viewportH);
     post.resize(w, viewportH);
     proj = perspective(FOV, w / viewportH, 0.1, 200);
@@ -735,8 +740,10 @@ function frame() {
             depthView,
             viewProj,
         );
-        godrays.encode(encoder, colorView, depthView, posterizeView, sun);
-        postInput = posterizeView;
+        // FXAA smooths stone edge aliasing before godrays compositing
+        fxaa.encode(encoder, colorView, posterizeView, "rgba8unorm");
+        godrays.encode(encoder, posterizeView, depthView, colorView, sun);
+        postInput = colorView;
     } else if (mode === "cubemap") {
         cubemap.encode(
             encoder,
@@ -751,8 +758,10 @@ function frame() {
             colorView,
             depthView,
         );
-        godrays.encode(encoder, colorView, depthView, posterizeView, sun);
-        postInput = posterizeView;
+        // FXAA smooths stone edge aliasing before godrays compositing
+        fxaa.encode(encoder, colorView, posterizeView, "rgba8unorm");
+        godrays.encode(encoder, posterizeView, depthView, colorView, sun);
+        postInput = colorView;
     } else {
         direct.encode(
             encoder,
