@@ -188,7 +188,11 @@ export function createDirect(config: DirectConfig): DirectEncoder {
             @fragment fn fs(in: VsOut) -> FsOut {
                 let t = clamp(in.worldPos.y / ${config.height}, 0.0, 1.0);
                 let wp = in.worldPos.xz;
-                let h = lodHash2(wp, ${config.density}.0);
+
+                // Broad-patch height scale: ~5-unit zones range from 25% to 100%
+                // of max height, creating clearly visible short and tall areas.
+                let patchHeightScale = mix(0.25, 1.0, hash2(floor(wp * 0.2)));
+                let h = lodHash2(wp, ${config.density}.0) * patchHeightScale;
                 if (h < t) { discard; }
                 if (t > 0.0 && pathGrassDiscard(wp)) { discard; }
 

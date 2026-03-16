@@ -58,10 +58,10 @@ progress(0.05);
 await yieldFrame();
 
 // Shell grass constants
-const LAYERS = 8;
+const LAYERS = 16;
 const SUBDIVISIONS = 16;
 const AREA = 200;
-const HEIGHT = 0.1;
+const HEIGHT = 0.35;
 const COLOR = 0x5a8a32;
 const DENSITY = 80;
 const ROOT_L = 0.85;
