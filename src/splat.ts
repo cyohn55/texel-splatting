@@ -1434,10 +1434,10 @@ fn dirToFaceUVf(dir: vec3f) -> vec3f {
             origins[1][0] = ts.origin[0]; origins[1][1] = ts.origin[1]; origins[1][2] = ts.origin[2];
             origins[2][0] = ts.prevOrigin[0]; origins[2][1] = ts.prevOrigin[1]; origins[2][2] = ts.prevOrigin[2];
 
-            // Reset reusable frustum cache without allocating a new array each frame
-            for (let i = 0; i < PROBE_LAYERS; i++) facePlanes[i] = null;
-
-            // Upload face uniforms and compute frustum planes for each probe
+            // Upload face uniforms and compute frustum planes for each probe.
+            // facePlanes entries are only read for layers written in this same frame,
+            // so no reset is needed — stale entries from prior frames are never accessed.
+            let maxWrittenLayer = -1;
             for (let p = 0; p < 3; p++) {
                 if (!(activeProbes & (1 << p))) continue;
                 let mask: number;
@@ -1463,12 +1463,14 @@ fn dirToFaceUVf(dir: vec3f) -> vec3f {
                         up[2],
                     );
                     const vp = multiply(proj, view);
-                    facePlanes[base + i] = extractFrustumPlanes(vp);
+                    const layer = base + i;
+                    facePlanes[layer] = extractFrustumPlanes(vp);
+                    if (layer > maxWrittenLayer) maxWrittenLayer = layer;
                     vp[1] *= -1;
                     vp[5] *= -1;
                     vp[9] *= -1;
                     vp[13] *= -1;
-                    const stagingBase = (base + i) * FACE_UNIFORM_STRIDE_F32;
+                    const stagingBase = layer * FACE_UNIFORM_STRIDE_F32;
                     faceUniformStaging.set(vp, stagingBase);
                     faceUniformStaging[stagingBase + 16] = ox;
                     faceUniformStaging[stagingBase + 17] = oy;
@@ -1480,8 +1482,8 @@ fn dirToFaceUVf(dir: vec3f) -> vec3f {
                     faceUniformStaging[stagingBase + 23] = FAR;
                 }
             }
-            // One upload for all active face uniforms instead of one per face
-            device.queue.writeBuffer(faceUniformBuffer, 0, faceUniformStaging);
+            // Upload only the portion of the staging buffer that was written this frame
+            device.queue.writeBuffer(faceUniformBuffer, 0, faceUniformStaging, 0, (maxWrittenLayer + 1) * FACE_UNIFORM_STRIDE_F32);
 
             const { grass, stones, orbs } = config.meshAABBs;
 
@@ -1616,21 +1618,9 @@ fn dirToFaceUVf(dir: vec3f) -> vec3f {
 
             const wg = Math.ceil(PROBE_SIZE / 8);
 
-            const computePass = encoder.beginComputePass();
-            computePass.setPipeline(lightingPipeline);
-            computePass.setBindGroup(0, lightingBindGroup);
-            computePass.dispatchWorkgroups(wg, wg, activeLayerCount);
-            computePass.end();
-
-            // Edge mask compute
-            const edgeMaskPass = encoder.beginComputePass();
-            edgeMaskPass.setPipeline(edgeMaskPipeline);
-            edgeMaskPass.setBindGroup(0, edgeMaskBindGroup);
-            edgeMaskPass.dispatchWorkgroups(wg, wg, prevMask > 0 ? PROBE_LAYERS : 12);
-            edgeMaskPass.end();
-
-            // Probe params
-            probeData.fill(0);
+            // Probe params — probeData is zero-initialized at construction and indices that
+            // are always zero (3, 7, 11, 14, 15, 18, 19, 22, 23, 27, 30, 31) are never
+            // overwritten, so no fill() is needed each frame.
             for (let i = 0; i < 3; i++) {
                 const [ox, oy, oz] = origins[i];
                 probeData[i * 4] = ox;
@@ -1650,15 +1640,28 @@ fn dirToFaceUVf(dir: vec3f) -> vec3f {
             probeData[29] = fadeT;
             device.queue.writeBuffer(probeParamsBuffer, 0, probeData);
 
-            // Reset indirect args and run cull
+            // Reset only the indirect instance count (element [1]); the other three
+            // elements (vertexCount=6, firstVertex=0, firstInstance=0) are constant.
             indirectData[1] = 0;
-            device.queue.writeBuffer(indirectArgsBuffer, 0, indirectData);
+            device.queue.writeBuffer(indirectArgsBuffer, 4, indirectData, 1, 1);
 
-            const cullPass = encoder.beginComputePass();
-            cullPass.setPipeline(cullPipeline);
-            cullPass.setBindGroup(0, cullBindGroup);
-            cullPass.dispatchWorkgroups(Math.ceil(FACE_TEXELS / 64), prevMask > 0 ? PROBE_LAYERS : 12);
-            cullPass.end();
+            // All three compute dispatches share a single pass — lighting, edge mask,
+            // and cull write to disjoint resources so no barriers are needed between them.
+            const computePass = encoder.beginComputePass();
+
+            computePass.setPipeline(lightingPipeline);
+            computePass.setBindGroup(0, lightingBindGroup);
+            computePass.dispatchWorkgroups(wg, wg, activeLayerCount);
+
+            computePass.setPipeline(edgeMaskPipeline);
+            computePass.setBindGroup(0, edgeMaskBindGroup);
+            computePass.dispatchWorkgroups(wg, wg, prevMask > 0 ? PROBE_LAYERS : 12);
+
+            computePass.setPipeline(cullPipeline);
+            computePass.setBindGroup(0, cullBindGroup);
+            computePass.dispatchWorkgroups(Math.ceil(FACE_TEXELS / 64), prevMask > 0 ? PROBE_LAYERS : 12);
+
+            computePass.end();
 
             // Upload splat scene buffer (viewProj + cameraPos) — reuse pre-allocated array
             splatSceneData.set(viewProj, 0);
@@ -1689,8 +1692,8 @@ fn dirToFaceUVf(dir: vec3f) -> vec3f {
             displayPass.setBindGroup(0, displayBindGroup);
             displayPass.draw(3);
 
+            // displayBindGroup persists within the pass — no need to re-bind for splatPipeline
             displayPass.setPipeline(splatPipeline);
-            displayPass.setBindGroup(0, displayBindGroup);
             displayPass.drawIndirect(indirectArgsBuffer, 0);
 
             displayPass.end();
