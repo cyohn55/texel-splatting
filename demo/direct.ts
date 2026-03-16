@@ -171,32 +171,25 @@ export function createDirect(config: DirectConfig): DirectEncoder {
                 @location(1) dist: f32,
             }
 
-            // Voronoi region hash: finds the nearest randomly-jittered seed within
-            // a scaled grid and returns that seed's hash value. Produces irregular
-            // organic polygons instead of uniform squares.
-            fn voronoiHash(wp: vec2f, scale: f32) -> f32 {
+            // Smooth value noise: bilinearly interpolates between random values at
+            // the four corners of each grid cell using a cubic (smoothstep) curve.
+            // Produces continuously curving, blob-like regions with no hard edges.
+            fn smoothNoise(wp: vec2f, scale: f32) -> f32 {
                 let p  = wp * scale;
                 let ip = floor(p);
                 let fp = fract(p);
-                var minDist = 8.0;
-                var cellId  = 0.0;
-                for (var jj = -1; jj <= 1; jj++) {
-                    for (var ii = -1; ii <= 1; ii++) {
-                        let nb     = vec2f(f32(ii), f32(jj));
-                        let cell   = ip + nb;
-                        let jitter = vec2f(
-                            hash2(cell),
-                            hash2(cell + vec2f(31.1, 17.9))
-                        );
-                        let diff = nb + jitter - fp;
-                        let dist = dot(diff, diff);
-                        if (dist < minDist) {
-                            minDist = dist;
-                            cellId  = hash2(cell + vec2f(7.3, 13.1));
-                        }
-                    }
-                }
-                return cellId;
+                // Cubic smoothstep for C1-continuous curved boundaries
+                let u  = fp * fp * (3.0 - 2.0 * fp);
+                let a  = hash2(ip + vec2f(0.0, 0.0));
+                let b  = hash2(ip + vec2f(1.0, 0.0));
+                let c  = hash2(ip + vec2f(0.0, 1.0));
+                let d  = hash2(ip + vec2f(1.0, 1.0));
+                return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+            }
+
+            // Two-octave smooth noise for larger organic shapes with finer detail.
+            fn patchNoise(wp: vec2f) -> f32 {
+                return smoothNoise(wp, 0.15) * 0.65 + smoothNoise(wp, 0.35) * 0.35;
             }
 
             // Mip-mapped hash: blends between adjacent LOD levels based on how many
@@ -217,9 +210,9 @@ export function createDirect(config: DirectConfig): DirectEncoder {
                 let t = clamp(in.worldPos.y / ${config.height}, 0.0, 1.0);
                 let wp = in.worldPos.xz;
 
-                // Voronoi-shaped height patches: irregular organic polygons (~5-unit
-                // regions) ranging from 25% to 100% of max height.
-                let patchHeightScale = mix(0.25, 1.0, voronoiHash(wp, 0.2));
+                // Smooth-noise height patches: continuously curved regions ranging
+                // from 25% to 100% of max height, with no hard edges.
+                let patchHeightScale = mix(0.25, 1.0, patchNoise(wp));
                 let h = lodHash2(wp, ${config.density}.0) * patchHeightScale;
                 if (h < t) { discard; }
                 if (t > 0.0 && pathGrassDiscard(wp)) { discard; }
