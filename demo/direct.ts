@@ -188,31 +188,16 @@ export function createDirect(config: DirectConfig): DirectEncoder {
             @fragment fn fs(in: VsOut) -> FsOut {
                 let t = clamp(in.worldPos.y / ${config.height}, 0.0, 1.0);
                 let wp = in.worldPos.xz;
-
-                // Broad-patch height scale: ~5-unit zones of taller/shorter grass
-                let patchHeightScale = mix(0.3, 1.0, hash2(floor(wp * 0.2)));
-                let h = lodHash2(wp, ${config.density}.0) * patchHeightScale;
+                let h = lodHash2(wp, ${config.density}.0);
                 if (h < t) { discard; }
                 if (t > 0.0 && pathGrassDiscard(wp)) { discard; }
 
-                // 5-shade green palette (OKLab deltas from base): ~2.5-unit colour patches
-                let shadeIdx = min(i32(hash2(floor(wp * 0.4)) * 5.0), 4);
                 let base = vec3f(${config.baseR}, ${config.baseG}, ${config.baseB});
                 let oklab = toOKLab(base);
-
-                var shadeDL: f32; var shadeDA: f32; var shadeDB: f32;
-                switch shadeIdx {
-                    case 0: { shadeDL = -0.24; shadeDA = -0.03; shadeDB = -0.07; } // dark forest green (near-black, cool)
-                    case 1: { shadeDL = -0.10; shadeDA = -0.02; shadeDB = -0.02; } // rich mid-green
-                    case 2: { shadeDL =  0.00; shadeDA =  0.00; shadeDB =  0.00; } // base green
-                    case 3: { shadeDL =  0.10; shadeDA =  0.07; shadeDB =  0.13; } // warm yellow-green
-                    default: { shadeDL =  0.22; shadeDA =  0.04; shadeDB =  0.18; } // bright lime / dry straw-green
-                }
-
-                let lBase = oklab.x + shadeDL;
-                let l = mix(lBase * ${config.rootL}, lBase * ${config.tipL}, t);
-                let a = oklab.y + shadeDA;
-                let b = mix(oklab.z + shadeDB - 0.01, oklab.z + shadeDB + 0.01, t);
+                let hueVar = hash2(floor(wp * ${config.hueFreq}));
+                let l = mix(oklab.x * ${config.rootL}, oklab.x * ${config.tipL}, t) + (hueVar - 0.5) * ${config.hueVar};
+                let a = oklab.y + (hueVar - 0.5) * ${config.hueVar};
+                let b = mix(oklab.z - 0.01, oklab.z + 0.01, t) + (hueVar - 0.5) * ${config.hueVar};
                 var color = fromOKLab(vec3(l, a, b));
                 if (t == 0.0) { color = pathGroundColor(wp, color); }
 
