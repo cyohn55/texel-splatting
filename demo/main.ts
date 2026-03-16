@@ -740,9 +740,9 @@ function frame() {
             depthView,
             viewProj,
         );
-        // FXAA smooths stone edge aliasing before godrays compositing
-        fxaa.encode(encoder, colorView, posterizeView, "rgba8unorm");
-        godrays.encode(encoder, posterizeView, depthView, colorView, sun);
+        godrays.encode(encoder, colorView, depthView, posterizeView, sun);
+        // FXAA smooths stone edge aliasing; posterizeView → colorView (colorView is free here)
+        fxaa.encode(encoder, posterizeView, colorView, "rgba8unorm");
         postInput = colorView;
     } else if (mode === "cubemap") {
         cubemap.encode(
@@ -758,9 +758,9 @@ function frame() {
             colorView,
             depthView,
         );
-        // FXAA smooths stone edge aliasing before godrays compositing
-        fxaa.encode(encoder, colorView, posterizeView, "rgba8unorm");
-        godrays.encode(encoder, posterizeView, depthView, colorView, sun);
+        godrays.encode(encoder, colorView, depthView, posterizeView, sun);
+        // FXAA smooths stone edge aliasing; posterizeView → colorView (colorView is free here)
+        fxaa.encode(encoder, posterizeView, colorView, "rgba8unorm");
         postInput = colorView;
     } else {
         direct.encode(
