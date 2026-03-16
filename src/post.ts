@@ -98,6 +98,49 @@ fn aces(x: vec3f) -> vec3f {
     return vec4f(aces(combined), 1.0);
 }`;
 
+// FXAA detects edges by comparing luminance of the 4 diagonal neighbours
+// against the centre pixel, then blends along the dominant edge orientation.
+// Applied at render resolution before nearest-neighbour upscale to canvas.
+const fxaaShader = /* wgsl */ `
+${vertexWGSL}
+
+@group(0) @binding(0) var srcTex: texture_2d<f32>;
+@group(0) @binding(1) var srcSamp: sampler;
+@group(0) @binding(2) var<uniform> invSize: vec2f;
+
+fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.299, 0.587, 0.114)); }
+
+@fragment fn fs(in: VsOut) -> @location(0) vec4f {
+    let uv = in.uv;
+    let ts = invSize;
+
+    let m  = textureSample(srcTex, srcSamp, uv).rgb;
+    let nw = textureSample(srcTex, srcSamp, uv + vec2f(-ts.x, -ts.y)).rgb;
+    let ne = textureSample(srcTex, srcSamp, uv + vec2f( ts.x, -ts.y)).rgb;
+    let sw = textureSample(srcTex, srcSamp, uv + vec2f(-ts.x,  ts.y)).rgb;
+    let se = textureSample(srcTex, srcSamp, uv + vec2f( ts.x,  ts.y)).rgb;
+
+    let lumaNW = luma(nw); let lumaNE = luma(ne);
+    let lumaSW = luma(sw); let lumaSE = luma(se);
+    let lumaM  = luma(m);
+
+    let lumaMin = min(lumaM, min(min(lumaNW, lumaNE), min(lumaSW, lumaSE)));
+    let lumaMax = max(lumaM, max(max(lumaNW, lumaNE), max(lumaSW, lumaSE)));
+    let contrast = lumaMax - lumaMin;
+
+    // Pass non-edge pixels through unchanged
+    if (contrast < max(0.02, lumaMax * 0.05)) { return vec4f(m, 1.0); }
+
+    // Determine dominant edge orientation and blend perpendicular neighbours
+    let edgeH = abs(lumaNW + lumaNE - 2.0 * lumaM) + abs(lumaSW + lumaSE - 2.0 * lumaM);
+    let edgeV = abs(lumaNW + lumaSW - 2.0 * lumaM) + abs(lumaNE + lumaSE - 2.0 * lumaM);
+    let step = select(vec2f(ts.x, 0.0), vec2f(0.0, ts.y), edgeH >= edgeV);
+
+    let c1 = textureSample(srcTex, srcSamp, uv + step).rgb;
+    let c2 = textureSample(srcTex, srcSamp, uv - step).rgb;
+    return vec4f(mix(m, (c1 + c2) * 0.5, clamp(contrast * 8.0, 0.0, 0.75)), 1.0);
+}`;
+
 interface Mip {
     texture: GPUTexture;
     view: GPUTextureView;
@@ -175,6 +218,22 @@ export function createPostProcess(device: GPUDevice, outputFormat: GPUTextureFor
     const upsamplePipeline = makePipeline(upsampleModule, MIP_FORMAT, true);
     const compositePipeline = makePipeline(compositeModule, outputFormat, false);
 
+    const fxaaModule = device.createShaderModule({ code: fxaaShader });
+    const fxaaPipeline = makePipeline(fxaaModule, outputFormat, false);
+
+    // Intermediate render-resolution texture: composite writes here, FXAA reads it
+    let fxaaTexture: GPUTexture | null = null;
+    let fxaaView: GPUTextureView | null = null;
+
+    // Uniform buffer holding (1/renderWidth, 1/renderHeight) for FXAA pixel size
+    const fxaaInvSizeBuffer = device.createBuffer({
+        size: 8,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const fxaaInvSizeData = new Float32Array(2);
+
+    let fxaaBindGroup: GPUBindGroup | null = null;
+
     let mips: Mip[] = [];
     let cachedWidth = 0;
     let cachedHeight = 0;
@@ -212,6 +271,21 @@ export function createPostProcess(device: GPUDevice, outputFormat: GPUTextureFor
 
         for (const m of mips) m.texture.destroy();
         mips = [];
+
+        // Rebuild the FXAA intermediate texture at the new render resolution
+        fxaaTexture?.destroy();
+        fxaaTexture = device.createTexture({
+            size: { width, height },
+            format: outputFormat,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        });
+        fxaaView = fxaaTexture.createView();
+        fxaaBindGroup = null; // rebuilt on next encode
+
+        // Upload render-space pixel size for FXAA neighbourhood sampling
+        fxaaInvSizeData[0] = 1 / width;
+        fxaaInvSizeData[1] = 1 / height;
+        device.queue.writeBuffer(fxaaInvSizeBuffer, 0, fxaaInvSizeData);
 
         let w = Math.max(1, width >> 1);
         let h = Math.max(1, height >> 1);
@@ -309,6 +383,18 @@ export function createPostProcess(device: GPUDevice, outputFormat: GPUTextureFor
                 cachedInputView = inputView;
             }
 
+            // Build FXAA bind group once per resize (fxaaView changes on resize)
+            if (!fxaaBindGroup) {
+                fxaaBindGroup = device.createBindGroup({
+                    layout: fxaaPipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: fxaaView! },
+                        { binding: 1, resource: sampler },
+                        { binding: 2, resource: { buffer: fxaaInvSizeBuffer } },
+                    ],
+                });
+            }
+
             fullscreenPass(encoder, thresholdPipeline, thresholdBindGroup!, mips[0].view, "clear");
 
             for (let i = 0; i < downBindGroups.length; i++) {
@@ -332,7 +418,11 @@ export function createPostProcess(device: GPUDevice, outputFormat: GPUTextureFor
                 );
             }
 
-            fullscreenPass(encoder, compositePipeline, compositeBindGroup!, outputView, "clear");
+            // Composite → intermediate fxaaTexture (render resolution)
+            fullscreenPass(encoder, compositePipeline, compositeBindGroup!, fxaaView!, "clear");
+
+            // FXAA → final outputView (canvas), smoothing edges before upscale
+            fullscreenPass(encoder, fxaaPipeline, fxaaBindGroup, outputView, "clear");
         },
 
         destroy(): void {
@@ -340,6 +430,10 @@ export function createPostProcess(device: GPUDevice, outputFormat: GPUTextureFor
             mips = [];
             for (const buf of uniformPool) buf.destroy();
             uniformPool.length = 0;
+            fxaaTexture?.destroy();
+            fxaaTexture = null;
+            fxaaView = null;
+            fxaaInvSizeBuffer.destroy();
             cachedWidth = 0;
             cachedHeight = 0;
             cachedInputView = null;
