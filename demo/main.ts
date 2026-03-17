@@ -5,6 +5,7 @@ import { computeVertexAABB } from "../src/lighting";
 import { lookAt, multiply, perspective } from "../src/math";
 import { createGodRays } from "../src/godrays";
 import { createPostProcess } from "../src/post";
+import { createFxaa } from "../Working/fxaa";
 import { createSplat } from "../src/splat";
 import { createSphere, createStones } from "./scene";
 import { createDirect } from "./direct";
@@ -255,7 +256,8 @@ const cubemap = createCubemap({ ...sceneConfig, ...bvhConfig });
 const splat = createSplat({ ...sceneConfig, ...bvhConfig });
 
 const godrays = createGodRays(device);
-const post = createPostProcess(device, format);
+const post = createPostProcess(device, "rgba8unorm");
+const fxaa = createFxaa(device);
 
 progress(0.8);
 await yieldFrame();
@@ -302,9 +304,17 @@ let posterizeTexture = device.createTexture({
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
 });
 
+// Intermediate LDR texture: post writes here, then FXAA reads it and outputs to canvas.
+let postOutputTexture = device.createTexture({
+    size: [renderW, renderH],
+    format: "rgba8unorm",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+});
+
 let colorView = colorTexture.createView();
 let posterizeView = posterizeTexture.createView();
 let depthView = depthTexture.createView();
+let postOutputView = postOutputTexture.createView();
 
 const direct = createDirect({
     ...sceneConfig,
@@ -315,6 +325,7 @@ const direct = createDirect({
 
 direct.resize(renderW, renderH, colorView, posterizeView);
 post.resize(renderW, renderH);
+fxaa.resize(renderW, renderH);
 
 let proj = perspective(FOV, renderW / renderH, 0.1, 200);
 
@@ -348,9 +359,17 @@ new ResizeObserver(() => {
     colorView = colorTexture.createView();
     posterizeView = posterizeTexture.createView();
     depthView = depthTexture.createView();
+    postOutputTexture.destroy();
+    postOutputTexture = device.createTexture({
+        size: [w, viewportH],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    postOutputView = postOutputTexture.createView();
     direct.resize(w, viewportH, colorView, posterizeView);
     godrays.resize(w, viewportH);
     post.resize(w, viewportH);
+    fxaa.resize(w, viewportH);
     proj = perspective(FOV, w / viewportH, 0.1, 200);
 }).observe(canvas);
 
@@ -754,18 +773,40 @@ function frame() {
         godrays.encode(encoder, colorView, depthView, posterizeView, sun);
         postInput = posterizeView;
     } else {
+        // Render sky, stones, and orbs via direct rasterization (no grass).
         direct.encode(
             encoder,
             (e, c, d) => sky.encode(e, c, d),
             colorView,
             depthView,
             posterizeView,
+            { skipGrass: true },
+        );
+        // Composite grass on top using texel splatting, loading the direct-rendered
+        // colorView/depthView so grass depth-tests correctly against stones.
+        splat.encode(
+            encoder,
+            {
+                cameraPos: [px, py, pz],
+                cameraFwd: [lx, ly, lz],
+                sunDir: [-ldx, -ldy, -ldz],
+                sunColor: [sc.r * si, sc.g * si, sc.b * si],
+                ambient: [ac.r * ai, ac.g * ai, ac.b * ai],
+                shadowFade: sf,
+                pointLightCount: 1,
+                time: performance.now() / 1000,
+                grassOnly: true,
+            },
+            colorView,
+            depthView,
+            viewProj,
         );
         godrays.encode(encoder, colorView, depthView, posterizeView, sun);
         postInput = posterizeView;
     }
 
-    post.encode(encoder, postInput, context.getCurrentTexture().createView());
+    post.encode(encoder, postInput, postOutputView);
+    fxaa.encode(encoder, postOutputView, context.getCurrentTexture().createView(), format);
 
     device.queue.submit([encoder.finish()]);
     if (loaded) requestAnimationFrame(frame);

@@ -154,6 +154,9 @@ export interface SplatEncoder {
             shadowFade: number;
             pointLightCount: number;
             time: number;
+            /** When true, only grass is captured in probes and composited on top of
+             *  an already-rendered colorView/depthView (e.g. from direct rendering). */
+            grassOnly?: boolean;
         },
         colorView: GPUTextureView,
         depthView: GPUTextureView,
@@ -1546,22 +1549,26 @@ fn dirToFaceUVf(dir: vec3f) -> vec3f {
                         pass.drawIndexed(config.indexCount);
                     }
 
-                    if (aabbInFrustum(planes, stones)) {
-                        pass.setPipeline(stoneGbufferPipeline);
-                        pass.setBindGroup(0, faceBindGroup, [dynamicOffset]);
-                        pass.setVertexBuffer(0, config.stoneVertexBuffer);
-                        pass.setIndexBuffer(config.stoneIndexBuffer, "uint16");
-                        pass.drawIndexed(config.stoneIndexCount);
-                    }
+                    // In grassOnly mode, stones and orbs are already rendered by the
+                    // direct pass — skip them here to avoid double-drawing.
+                    if (!params.grassOnly) {
+                        if (aabbInFrustum(planes, stones)) {
+                            pass.setPipeline(stoneGbufferPipeline);
+                            pass.setBindGroup(0, faceBindGroup, [dynamicOffset]);
+                            pass.setVertexBuffer(0, config.stoneVertexBuffer);
+                            pass.setIndexBuffer(config.stoneIndexBuffer, "uint16");
+                            pass.drawIndexed(config.stoneIndexCount);
+                        }
 
-                    if (aabbInFrustum(planes, orbs)) {
-                        pass.setPipeline(emissiveGbufferPipeline);
-                        pass.setBindGroup(0, faceBindGroup, [dynamicOffset]);
-                        pass.setVertexBuffer(0, config.orbVertexBuffer);
-                        pass.setIndexBuffer(config.orbIndexBuffer, "uint16");
-                        for (let j = 0; j < 4; j++) {
-                            pass.setBindGroup(1, orbBindGroups[j]);
-                            pass.drawIndexed(config.orbIndexCount);
+                        if (aabbInFrustum(planes, orbs)) {
+                            pass.setPipeline(emissiveGbufferPipeline);
+                            pass.setBindGroup(0, faceBindGroup, [dynamicOffset]);
+                            pass.setVertexBuffer(0, config.orbVertexBuffer);
+                            pass.setIndexBuffer(config.orbIndexBuffer, "uint16");
+                            for (let j = 0; j < 4; j++) {
+                                pass.setBindGroup(1, orbBindGroups[j]);
+                                pass.drawIndexed(config.orbIndexCount);
+                            }
                         }
                     }
 
@@ -1670,30 +1677,34 @@ fn dirToFaceUVf(dir: vec3f) -> vec3f {
             splatSceneData[18] = cz;
             device.queue.writeBuffer(splatSceneBuffer, 0, splatSceneData);
 
-            // Display render pass
+            // Display render pass.
+            // In grassOnly mode, colorView and depthView already contain the direct-rendered
+            // scene, so we load (composite) rather than clear, and skip the background draw.
             const displayPass = encoder.beginRenderPass({
                 colorAttachments: [
                     {
                         view: colorView,
                         clearValue: [0, 0, 0, 1],
-                        loadOp: "clear",
+                        loadOp: params.grassOnly ? "load" : "clear",
                         storeOp: "store",
                     },
                 ],
                 depthStencilAttachment: {
                     view: depthView,
                     depthClearValue: 1,
-                    depthLoadOp: "clear",
+                    depthLoadOp: params.grassOnly ? "load" : "clear",
                     depthStoreOp: "store",
                 },
             });
 
-            displayPass.setPipeline(backgroundPipeline);
-            displayPass.setBindGroup(0, displayBindGroup);
-            displayPass.draw(3);
+            if (!params.grassOnly) {
+                displayPass.setPipeline(backgroundPipeline);
+                displayPass.setBindGroup(0, displayBindGroup);
+                displayPass.draw(3);
+            }
 
-            // displayBindGroup persists within the pass — no need to re-bind for splatPipeline
             displayPass.setPipeline(splatPipeline);
+            displayPass.setBindGroup(0, displayBindGroup);
             displayPass.drawIndirect(indirectArgsBuffer, 0);
 
             displayPass.end();
