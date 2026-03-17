@@ -213,12 +213,20 @@ export function createDirect(config: DirectConfig): DirectEncoder {
                 // Smooth-noise height patches: continuously curved regions ranging
                 // from 25% to 100% of max height, with no hard edges.
                 let patchHeightScale = mix(0.25, 1.0, patchNoise(wp));
-                let h = lodHash2(wp, ${config.density}.0) * patchHeightScale;
 
-                // Distance-based tier clamp: upper shell layers become sub-pixel at
-                // distance and shimmer as the camera moves. Smoothly retire them
-                // beyond ~15 m so only stable lower tiers render far away.
+                // Anti-shimmer height hash: lodHash2 uses fwidth() whose value
+                // changes each frame as the camera moves, causing the LOD blend
+                // to shift and hash values to flicker. Fix: blend from per-blade
+                // hash (close) to smooth continuous noise (far). Smooth noise has
+                // bounded gradients so adjacent world points have similar values —
+                // no binary flipping between visible/invisible across frames.
                 let xzDist  = length(wp - u.cameraPos.xz);
+                let bladeH  = lodHash2(wp, ${config.density}.0);
+                let smoothH = smoothNoise(wp, 1.5);
+                let h       = mix(bladeH, smoothH, smoothstep(3.0, 20.0, xzDist))
+                              * patchHeightScale;
+
+                // Also retire upper tiers at distance as a secondary guard.
                 let maxTier = 1.0 - smoothstep(15.0, 45.0, xzDist) * 0.8;
                 if (h < t || t > maxTier) { discard; }
                 if (t > 0.0 && pathGrassDiscard(wp)) { discard; }
