@@ -214,7 +214,13 @@ export function createDirect(config: DirectConfig): DirectEncoder {
                 // from 25% to 100% of max height, with no hard edges.
                 let patchHeightScale = mix(0.25, 1.0, patchNoise(wp));
                 let h = lodHash2(wp, ${config.density}.0) * patchHeightScale;
-                if (h < t) { discard; }
+
+                // Distance-based tier clamp: upper shell layers become sub-pixel at
+                // distance and shimmer as the camera moves. Smoothly retire them
+                // beyond ~15 m so only stable lower tiers render far away.
+                let xzDist  = length(wp - u.cameraPos.xz);
+                let maxTier = 1.0 - smoothstep(15.0, 45.0, xzDist) * 0.8;
+                if (h < t || t > maxTier) { discard; }
                 if (t > 0.0 && pathGrassDiscard(wp)) { discard; }
 
                 let base = vec3f(${config.baseR}, ${config.baseG}, ${config.baseB});
