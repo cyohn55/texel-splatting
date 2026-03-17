@@ -318,10 +318,46 @@ fn octEncode(n: vec3<f32>) -> vec2<f32> {
                 @location(3) eid: u32,
             }
 
+            // Smooth value noise: bilinearly interpolates between random values at
+            // the four corners of each grid cell using a cubic (smoothstep) curve.
+            // Produces continuously curving, blob-like regions with no hard edges.
+            fn smoothNoise(wp: vec2f, scale: f32) -> f32 {
+                let p  = wp * scale;
+                let ip = floor(p);
+                let fp = fract(p);
+                let u  = fp * fp * (3.0 - 2.0 * fp);
+                let a  = hash2(ip + vec2f(0.0, 0.0));
+                let b  = hash2(ip + vec2f(1.0, 0.0));
+                let c  = hash2(ip + vec2f(0.0, 1.0));
+                let d  = hash2(ip + vec2f(1.0, 1.0));
+                return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+            }
+
+            // Mip-mapped hash: blends between adjacent LOD levels based on how many
+            // density cells fit within a single pixel (computed via screen-space
+            // derivatives). When cells are sub-pixel, a coarser level is used so
+            // each pixel maps to one stable cell, eliminating temporal shimmer.
+            fn lodHash2(wp: vec2f, density: f32) -> f32 {
+                let densityWp = wp * density;
+                let fw = max(fwidth(densityWp.x), fwidth(densityWp.y));
+                let lod = max(log2(fw), 0.0);
+                let lod0 = floor(lod);
+                let h0 = hash2(floor(densityWp / exp2(lod0)));
+                let h1 = hash2(floor(densityWp / exp2(lod0 + 1.0)));
+                return mix(h0, h1, fract(lod));
+            }
+
             @fragment fn fs(in: VsOut) -> GbufferOut {
                 let t = clamp(in.worldPos.y / ${config.height}, 0.0, 1.0);
                 let wp = in.worldPos.xz;
-                let h = hash2(floor(wp * ${config.density}.0));
+                // Anti-shimmer height hash: lodHash2 uses fwidth() so hash LOD
+                // tracks the probe texel footprint. At distance, blend to smooth
+                // continuous noise — its bounded gradients prevent binary flipping
+                // between visible/invisible as the probe origin shifts each frame.
+                let xzDist = length(wp - face.origin.xz);
+                let bladeH = lodHash2(wp, ${config.density}.0);
+                let smoothH = smoothNoise(wp, 1.5);
+                let h = mix(bladeH, smoothH, smoothstep(3.0, 20.0, xzDist));
                 if (h < t) { discard; }
                 if (t > 0.0 && pathGrassDiscard(wp)) { discard; }
 
