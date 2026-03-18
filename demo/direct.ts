@@ -26,7 +26,6 @@ export interface DirectEncoder {
         colorView: GPUTextureView,
         depthView: GPUTextureView,
         posterizeView: GPUTextureView,
-        options?: { skipGrass?: boolean },
     ): void;
     resize(
         width: number,
@@ -463,7 +462,7 @@ export function createDirect(config: DirectConfig): DirectEncoder {
     }
 
     return {
-        encode(encoder, skyEncode, colorView, depthView, posterizeView, options) {
+        encode(encoder, skyEncode, colorView, depthView, posterizeView) {
             skyEncode(encoder, colorView, depthView);
 
             const scenePass = encoder.beginRenderPass({
@@ -482,14 +481,11 @@ export function createDirect(config: DirectConfig): DirectEncoder {
                     depthStoreOp: "store",
                 },
             });
-            // Grass rendering is optional — skip when the splat system will handle it.
-            if (!options?.skipGrass) {
-                scenePass.setPipeline(grassPipeline);
-                scenePass.setBindGroup(0, config.sceneBindGroup);
-                scenePass.setVertexBuffer(0, config.vertexBuffer);
-                scenePass.setIndexBuffer(config.indexBuffer, "uint16");
-                scenePass.drawIndexed(config.indexCount);
-            }
+            scenePass.setPipeline(grassPipeline);
+            scenePass.setBindGroup(0, config.sceneBindGroup);
+            scenePass.setVertexBuffer(0, config.vertexBuffer);
+            scenePass.setIndexBuffer(config.indexBuffer, "uint16");
+            scenePass.drawIndexed(config.indexCount);
             scenePass.setPipeline(stonePipeline);
             scenePass.setBindGroup(0, config.sceneBindGroup);
             scenePass.setVertexBuffer(0, config.stoneVertexBuffer);
